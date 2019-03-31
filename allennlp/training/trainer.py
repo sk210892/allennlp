@@ -291,90 +291,93 @@ class Trainer(TrainerBase):
 
         histogram_parameters = set(self.model.get_parameters_for_histogram_tensorboard_logging())
 
-
         logger.info("Training")
         train_generator_tqdm = Tqdm.tqdm(train_generator,
                                          total=num_training_batches)
         cumulative_batch_size = 0
         for batch_group in train_generator_tqdm:
-            batches_this_epoch += 1
-            self._batch_num_total += 1
-            batch_num_total = self._batch_num_total
+            try:  # try to catch the OOM error
+                batches_this_epoch += 1
+                self._batch_num_total += 1
+                batch_num_total = self._batch_num_total
 
-            self.optimizer.zero_grad()
+                self.optimizer.zero_grad()
 
-            loss = self.batch_loss(batch_group, for_training=True)
+                loss = self.batch_loss(batch_group, for_training=True)
 
-            if torch.isnan(loss):
-                raise ValueError("nan loss encountered")
+                if torch.isnan(loss):
+                    raise ValueError("nan loss encountered")
 
-            loss.backward()
+                loss.backward()
 
-            train_loss += loss.item()
+                train_loss += loss.item()
 
-            batch_grad_norm = self.rescale_gradients()
+                batch_grad_norm = self.rescale_gradients()
 
-            # This does nothing if batch_num_total is None or you are using a
-            # scheduler which doesn't update per batch.
-            if self._learning_rate_scheduler:
-                self._learning_rate_scheduler.step_batch(batch_num_total)
-            if self._momentum_scheduler:
-                self._momentum_scheduler.step_batch(batch_num_total)
+                # This does nothing if batch_num_total is None or you are using a
+                # scheduler which doesn't update per batch.
+                if self._learning_rate_scheduler:
+                    self._learning_rate_scheduler.step_batch(batch_num_total)
+                if self._momentum_scheduler:
+                    self._momentum_scheduler.step_batch(batch_num_total)
 
-            if self._tensorboard.should_log_histograms_this_batch():
-                # get the magnitude of parameter updates for logging
-                # We need a copy of current parameters to compute magnitude of updates,
-                # and copy them to CPU so large models won't go OOM on the GPU.
-                param_updates = {name: param.detach().cpu().clone()
-                                 for name, param in self.model.named_parameters()}
-                self.optimizer.step()
-                for name, param in self.model.named_parameters():
-                    param_updates[name].sub_(param.detach().cpu())
-                    update_norm = torch.norm(param_updates[name].view(-1, ))
-                    param_norm = torch.norm(param.view(-1, )).cpu()
-                    self._tensorboard.add_train_scalar("gradient_update/" + name,
-                                                       update_norm / (param_norm + 1e-7))
-            else:
-                self.optimizer.step()
+                if self._tensorboard.should_log_histograms_this_batch():
+                    # get the magnitude of parameter updates for logging
+                    # We need a copy of current parameters to compute magnitude of updates,
+                    # and copy them to CPU so large models won't go OOM on the GPU.
+                    param_updates = {name: param.detach().cpu().clone()
+                                     for name, param in self.model.named_parameters()}
+                    self.optimizer.step()
+                    for name, param in self.model.named_parameters():
+                        param_updates[name].sub_(param.detach().cpu())
+                        update_norm = torch.norm(param_updates[name].view(-1, ))
+                        param_norm = torch.norm(param.view(-1, )).cpu()
+                        self._tensorboard.add_train_scalar("gradient_update/" + name,
+                                                           update_norm / (param_norm + 1e-7))
+                else:
+                    self.optimizer.step()
 
-            # Update moving averages
-            if self._moving_average is not None:
-                self._moving_average.apply(batch_num_total)
+                # Update moving averages
+                if self._moving_average is not None:
+                    self._moving_average.apply(batch_num_total)
 
-            # Update the description with the latest metrics
-            metrics = training_util.get_metrics(self.model, train_loss, batches_this_epoch)
-            description = training_util.description_from_metrics(metrics)
+                # Update the description with the latest metrics
+                metrics = training_util.get_metrics(self.model, train_loss, batches_this_epoch)
+                description = training_util.description_from_metrics(metrics)
 
-            train_generator_tqdm.set_description(description, refresh=False)
+                train_generator_tqdm.set_description(description, refresh=False)
 
-            # Log parameter values to Tensorboard
-            if self._tensorboard.should_log_this_batch():
-                self._tensorboard.log_parameter_and_gradient_statistics(self.model, batch_grad_norm)
-                self._tensorboard.log_learning_rates(self.model, self.optimizer)
+                # Log parameter values to Tensorboard
+                if self._tensorboard.should_log_this_batch():
+                    self._tensorboard.log_parameter_and_gradient_statistics(self.model, batch_grad_norm)
+                    self._tensorboard.log_learning_rates(self.model, self.optimizer)
 
-                self._tensorboard.add_train_scalar("loss/loss_train", metrics["loss"])
-                self._tensorboard.log_metrics({"epoch_metrics/" + k: v for k, v in metrics.items()})
+                    self._tensorboard.add_train_scalar("loss/loss_train", metrics["loss"])
+                    self._tensorboard.log_metrics({"epoch_metrics/" + k: v for k, v in metrics.items()})
 
-            if self._tensorboard.should_log_histograms_this_batch():
-                self._tensorboard.log_histograms(self.model, histogram_parameters)
+                if self._tensorboard.should_log_histograms_this_batch():
+                    self._tensorboard.log_histograms(self.model, histogram_parameters)
 
-            if self._log_batch_size_period:
-                cur_batch = sum([training_util.get_batch_size(batch) for batch in batch_group])
-                cumulative_batch_size += cur_batch
-                if (batches_this_epoch - 1) % self._log_batch_size_period == 0:
-                    average = cumulative_batch_size/batches_this_epoch
-                    logger.info(f"current batch size: {cur_batch} mean batch size: {average}")
-                    self._tensorboard.add_train_scalar("current_batch_size", cur_batch)
-                    self._tensorboard.add_train_scalar("mean_batch_size", average)
+                if self._log_batch_size_period:
+                    cur_batch = sum([training_util.get_batch_size(batch) for batch in batch_group])
+                    cumulative_batch_size += cur_batch
+                    if (batches_this_epoch - 1) % self._log_batch_size_period == 0:
+                        average = cumulative_batch_size/batches_this_epoch
+                        logger.info(f"current batch size: {cur_batch} mean batch size: {average}")
+                        self._tensorboard.add_train_scalar("current_batch_size", cur_batch)
+                        self._tensorboard.add_train_scalar("mean_batch_size", average)
 
-            # Save model if needed.
-            if self._model_save_interval is not None and (
-                    time.time() - last_save_time > self._model_save_interval
-            ):
-                last_save_time = time.time()
-                self._save_checkpoint(
-                        '{0}.{1}'.format(epoch, training_util.time_to_str(int(last_save_time)))
-                )
+                # Save model if needed.
+                if self._model_save_interval is not None and (
+                        time.time() - last_save_time > self._model_save_interval
+                ):
+                    last_save_time = time.time()
+                    self._save_checkpoint(
+                            '{0}.{1}'.format(epoch, training_util.time_to_str(int(last_save_time)))
+                    )
+            except RuntimeError:
+                logger.info("Skipping this batch, maybe because of OOM")
+                continue
         metrics = training_util.get_metrics(self.model, train_loss, batches_this_epoch, reset=True)
         metrics['cpu_memory_MB'] = peak_cpu_usage
         for (gpu_num, memory) in gpu_usage:
